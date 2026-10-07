@@ -1,40 +1,36 @@
 const SHARPIFY_DEFAULT_URL =
   'https://sharpify-pay.com/api/v1/gateway/payment/create-paymnet';
 
-function normalizeErrorMessage(value) {
+function normalizeMessage(value) {
   if (!value) {
-    return 'Não foi possível gerar o pagamento.';
+    return 'A Sharpify recusou a solicitação.';
   }
 
   if (typeof value === 'string') {
     return value;
   }
 
-  if (value?.message) {
-    return normalizeErrorMessage(value.message);
+  if (value.message) {
+    return normalizeMessage(value.message);
   }
 
-  if (value?.error) {
-    return normalizeErrorMessage(value.error);
+  if (value.error) {
+    return normalizeMessage(value.error);
   }
 
-  if (value?.detail) {
-    return normalizeErrorMessage(value.detail);
+  if (value.detail) {
+    return normalizeMessage(value.detail);
   }
 
   try {
     return JSON.stringify(value);
   } catch {
-    return 'Erro inesperado retornado pela Sharpify.';
+    return 'Erro retornado pela Sharpify.';
   }
 }
 
-function getString(value) {
+function clean(value) {
   return String(value ?? '').trim();
-}
-
-function getAmountInCents(amount) {
-  return Math.round(Number(amount) * 100);
 }
 
 async function createSharpify({
@@ -50,7 +46,7 @@ async function createSharpify({
 
   if (!clientId) {
     const error = new Error(
-      'SHARPIFY_CLIENT_ID não está configurado na Vercel.'
+      'SHARPIFY_CLIENT_ID não configurado na Vercel.'
     );
 
     error.status = 500;
@@ -60,7 +56,7 @@ async function createSharpify({
 
   if (!clientSecret) {
     const error = new Error(
-      'SHARPIFY_CLIENT_SECRET não está configurado na Vercel.'
+      'SHARPIFY_CLIENT_SECRET não configurado na Vercel.'
     );
 
     error.status = 500;
@@ -72,47 +68,37 @@ async function createSharpify({
     process.env.SHARPIFY_API_URL ||
     SHARPIFY_DEFAULT_URL;
 
-  /*
-   * Dados recebidos do site
-   */
-  const telefone = getString(
+  const telefone = clean(
     metadata?.telefone
   );
 
-  const operadora = getString(
+  const operadora = clean(
     metadata?.operadora
   );
 
-  const productName = getString(
-    input?.product_name
-  );
-
-  /*
-   * Nome enviado para a Sharpify
-   */
   const name =
-    productName ||
+    clean(input?.product_name) ||
     `Recarga ${operadora || 'Celular'}`;
 
-  /*
-   * Descrição enviada para a Sharpify.
-   * Aqui ficam operadora e telefone.
-   */
-  const description =
-    [
-      'Recarga de celular',
-      operadora
-        ? `Operadora: ${operadora}`
-        : null,
-      telefone
-        ? `Telefone: ${telefone}`
-        : null
-    ]
-      .filter(Boolean)
-      .join(' - ');
+  const description = [
+    'Recarga de celular',
+    operadora
+      ? `Operadora: ${operadora}`
+      : '',
+    telefone
+      ? `Telefone: ${telefone}`
+      : ''
+  ]
+    .filter(Boolean)
+    .join(' - ');
 
   /*
-   * Payload do Gateway Sharpify
+   * PAYLOAD EXATO DO ENDPOINT SHARPIFY
+   *
+   * name: obrigatório
+   * description: opcional
+   * amount: obrigatório
+   * gatewayMethod: obrigatório
    */
   const payload = {
     name,
@@ -142,11 +128,11 @@ async function createSharpify({
 
       body: JSON.stringify(payload)
     });
-  } catch (networkError) {
+  } catch (err) {
     const error = new Error(
-      `Não foi possível conectar à API Sharpify: ${
-        networkError?.message ||
-        'erro de conexão'
+      `Falha de conexão com a Sharpify: ${
+        err?.message ||
+        'erro desconhecido'
       }`
     );
 
@@ -155,11 +141,6 @@ async function createSharpify({
     throw error;
   }
 
-  /*
-   * Lê a resposta como texto primeiro.
-   * Isso evita quebrar quando a API devolver
-   * HTML ou uma resposta que não seja JSON.
-   */
   const rawText =
     await response.text();
 
@@ -176,48 +157,46 @@ async function createSharpify({
   }
 
   /*
-   * Erro HTTP da Sharpify
+   * AQUI ESTÁ A PARTE IMPORTANTE:
+   * não esconderemos a resposta da Sharpify.
    */
   if (!response.ok) {
+    const apiError =
+      data?.message ||
+      data?.error ||
+      data?.detail ||
+      data?.raw ||
+      `HTTP ${response.status}`;
+
     const message =
-      normalizeErrorMessage(
-        data?.message ||
-          data?.error ||
-          data?.detail ||
-          data?.raw
-      );
+      normalizeMessage(apiError);
 
     const error = new Error(
       `Sharpify HTTP ${response.status}: ${message}`
     );
 
     error.status =
-      response.status || 502;
+      response.status;
 
     throw error;
   }
 
   /*
-   * Algumas APIs retornam:
+   * Documentação Sharpify:
    *
    * {
-   *   success: true,
-   *   data: {...}
+   *   data: PaymentLinkProps
    * }
-   *
-   * Outras podem retornar diretamente os dados.
    */
-  const paymentData =
-    data?.data ||
-    data?.payment ||
-    data;
+  const paymentLink =
+    data?.data;
 
   if (
-    !paymentData ||
-    typeof paymentData !== 'object'
+    !paymentLink ||
+    typeof paymentLink !== 'object'
   ) {
     const error = new Error(
-      'A Sharpify respondeu sem os dados do pagamento.'
+      'A Sharpify respondeu sem data do pagamento.'
     );
 
     error.status = 502;
@@ -225,92 +204,49 @@ async function createSharpify({
     throw error;
   }
 
-  /*
-   * Estrutura documentada do pagamento
-   */
   const payment =
-    paymentData?.payment ||
-    {};
+    paymentLink.payment ||
+    null;
 
   const gateway =
     payment?.gateway ||
-    {};
+    null;
 
   const gatewayData =
     gateway?.data ||
-    paymentData?.gateway?.data ||
     {};
 
   /*
-   * Código PIX
+   * Segundo a documentação:
+   *
+   * payment.gateway.data.code
+   * payment.gateway.data.qrCode
+   * payment.gateway.data.paymentLink
    */
   const copyPaste =
-    gatewayData?.code ||
-    gatewayData?.copyPaste ||
-    gatewayData?.pixCode ||
-    paymentData?.code ||
-    paymentData?.copyPaste ||
-    paymentData?.pixCode ||
+    gatewayData.code ||
     '';
 
-  /*
-   * QR Code
-   */
   const qrCode =
-    gatewayData?.qrCode ||
-    gatewayData?.qrCodeBase64 ||
-    paymentData?.qrCode ||
-    paymentData?.qrCodeBase64 ||
+    gatewayData.qrCode ||
+    '';
+
+  const paymentLinkUrl =
+    gatewayData.paymentLink ||
     '';
 
   /*
-   * Link de pagamento
-   */
-  const paymentLink =
-    gatewayData?.paymentLink ||
-    paymentData?.paymentLink ||
-    paymentData?.url ||
-    null;
-
-  /*
-   * ID da transação
-   */
-  const transactionId =
-    paymentData?.id ||
-    payment?.id ||
-    paymentData?.transactionId ||
-    paymentData?.transaction_id ||
-    null;
-
-  /*
-   * Status
-   */
-  const status =
-    paymentData?.status ||
-    payment?.status ||
-    'PENDING';
-
-  /*
-   * Se não veio nenhum código PIX
-   * e também não veio QR/link,
-   * consideramos resposta inválida.
+   * Se a Sharpify criou o link,
+   * mas não retornou nenhum dado de PIX,
+   * devolvemos erro claro.
    */
   if (
     !copyPaste &&
     !qrCode &&
-    !paymentLink
+    !paymentLinkUrl
   ) {
-    const apiMessage =
-      normalizeErrorMessage(
-        data?.message ||
-          data?.error
-      );
-
     const error = new Error(
-      apiMessage !==
-        'Não foi possível gerar o pagamento.'
-        ? apiMessage
-        : 'A Sharpify criou a solicitação, mas não retornou código Pix, QR Code ou link de pagamento.'
+      'A Sharpify criou o pagamento, mas não retornou código Pix, QR Code ou link.'
     );
 
     error.status = 502;
@@ -318,15 +254,11 @@ async function createSharpify({
     throw error;
   }
 
-  /*
-   * Valor retornado pela Sharpify.
-   * Se não existir, usamos o valor enviado.
-   */
-  const returnedAmount =
+  const finalAmount =
     Number(
       payment?.amount ??
-        paymentData?.amount ??
-        amount
+      paymentLink?.pricing?.total ??
+      amount
     );
 
   return {
@@ -343,19 +275,23 @@ async function createSharpify({
 
       qrCode,
 
-      paymentLink
+      paymentLink:
+        paymentLinkUrl || null
     },
 
-    transactionId,
+    transactionId:
+      payment?.id ||
+      paymentLink?.id ||
+      null,
 
-    status,
+    status:
+      paymentLink?.status ||
+      'PENDING',
 
     amount:
-      Number.isFinite(returnedAmount)
-        ? getAmountInCents(
-            returnedAmount
-          )
-        : getAmountInCents(amount),
+      Math.round(
+        finalAmount * 100
+      ),
 
     amountDisplay:
       Number(amount).toLocaleString(
@@ -367,24 +303,11 @@ async function createSharpify({
       ),
 
     invoiceUrl:
-      paymentLink,
+      paymentLinkUrl || null,
 
     shortReference:
-      paymentData?.shortReference ||
-      paymentData?.reference ||
-      null,
-
-    customer: {
-      name:
-        paymentData?.customer?.name ||
-        null,
-
-      phone:
-        telefone || null,
-
-      operator:
-        operadora || null
-    }
+      paymentLink?.shortReference ||
+      null
   };
 }
 
@@ -392,9 +315,6 @@ export default async function handler(
   req,
   res
 ) {
-  /*
-   * Somente POST
-   */
   if (req.method !== 'POST') {
     return res.status(405).json({
       success: false,
@@ -410,9 +330,6 @@ export default async function handler(
         ? req.body
         : {};
 
-    /*
-     * Valor
-     */
     const amount =
       Number(input.amount);
 
@@ -428,42 +345,16 @@ export default async function handler(
       });
     }
 
-    /*
-     * Metadata enviada pelo frontend
-     */
     const metadata =
       input.metadata &&
       typeof input.metadata === 'object'
         ? input.metadata
         : {};
 
-    /*
-     * Nome do produto
-     */
-    const productName =
-      getString(
-        input.product_name
-      );
-
-    /*
-     * Garante que o gateway usado
-     * é Sharpify.
-     *
-     * Blackcat não participa mais
-     * deste arquivo.
-     */
     const data =
       await createSharpify({
         amount,
-        input: {
-          ...input,
-          product_name:
-            productName ||
-            `Recarga ${
-              metadata?.operadora ||
-              'Celular'
-            }`
-        },
+        input,
         metadata
       });
 
@@ -471,11 +362,12 @@ export default async function handler(
       success: true,
       data
     });
+
   } catch (error) {
     const message =
-      normalizeErrorMessage(
+      normalizeMessage(
         error?.message ||
-          error
+        error
       );
 
     const status =
