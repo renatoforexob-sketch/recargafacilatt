@@ -1,9 +1,24 @@
 const SHARPIFY_DEFAULT_URL =
   'https://sharpify-pay.com/api/v1/gateway/payment/create-paymnet';
 
-function getMessage(value) {
+function clean(value) {
+  return String(value ?? '').trim();
+}
+
+function onlyDigits(value) {
+  return String(value ?? '').replace(/\D/g, '');
+}
+
+function formatBRL(value) {
+  return Number(value).toLocaleString('pt-BR', {
+    style: 'currency',
+    currency: 'BRL'
+  });
+}
+
+function normalizeMessage(value) {
   if (!value) {
-    return 'Erro desconhecido retornado pela Sharpify.';
+    return 'A Sharpify recusou a solicitação.';
   }
 
   if (typeof value === 'string') {
@@ -11,48 +26,40 @@ function getMessage(value) {
   }
 
   if (value.message) {
-    return getMessage(value.message);
+    return normalizeMessage(value.message);
   }
 
   if (value.error) {
-    return getMessage(value.error);
+    return normalizeMessage(value.error);
   }
 
   if (value.detail) {
-    return getMessage(value.detail);
+    return normalizeMessage(value.detail);
   }
 
   try {
     return JSON.stringify(value);
   } catch {
-    return 'Erro desconhecido retornado pela Sharpify.';
+    return 'Erro retornado pela Sharpify.';
   }
 }
 
-function digits(value) {
-  return String(value ?? '').replace(/\D/g, '');
-}
-
-function text(value) {
-  return String(value ?? '').trim();
-}
-
-async function criarPagamentoSharpify({
+async function createSharpifyPayment({
   amount,
   productName,
   metadata
 }) {
-  const clientId = text(
+  const clientId = clean(
     process.env.SHARPIFY_CLIENT_ID
   );
 
-  const clientSecret = text(
+  const clientSecret = clean(
     process.env.SHARPIFY_CLIENT_SECRET
   );
 
   if (!clientId) {
     const error = new Error(
-      'SHARPIFY_CLIENT_ID não está configurado na Vercel.'
+      'SHARPIFY_CLIENT_ID não configurado na Vercel.'
     );
 
     error.status = 500;
@@ -61,7 +68,7 @@ async function criarPagamentoSharpify({
 
   if (!clientSecret) {
     const error = new Error(
-      'SHARPIFY_CLIENT_SECRET não está configurado na Vercel.'
+      'SHARPIFY_CLIENT_SECRET não configurado na Vercel.'
     );
 
     error.status = 500;
@@ -69,46 +76,48 @@ async function criarPagamentoSharpify({
   }
 
   const apiUrl =
-    text(process.env.SHARPIFY_API_URL) ||
+    clean(process.env.SHARPIFY_API_URL) ||
     SHARPIFY_DEFAULT_URL;
 
-  const telefone = digits(
+  const telefone = onlyDigits(
     metadata?.telefone
   );
 
-  const operadora = text(
+  const operadora = clean(
     metadata?.operadora
   );
 
   /*
-   * A Sharpify exige:
+   * Nome interno do pagamento.
    *
-   * name
-   * amount
-   * gatewayMethod
-   *
-   * description é opcional.
+   * Exemplo:
+   * Recarga Fácil - Recarga TIM
    */
-
   const name =
-    text(productName) ||
-    `Recarga ${operadora || 'Celular'}`;
+    `Recarga Fácil - Recarga ${
+      operadora || 'Celular'
+    }`;
 
+  /*
+   * Mantemos na descrição os dados
+   * importantes da compra.
+   */
   const description = [
-    'Recarga de celular',
+    `Produto: ${name}`,
     operadora
       ? `Operadora: ${operadora}`
       : null,
     telefone
       ? `Telefone: ${telefone}`
-      : null
+      : null,
+    `Valor: ${formatBRL(amount)}`
   ]
     .filter(Boolean)
-    .join(' - ');
+    .join(' | ');
 
   /*
    * Payload exatamente conforme
-   * a documentação oficial da Sharpify.
+   * a documentação do Gateway Sharpify.
    */
   const payload = {
     name,
@@ -119,6 +128,11 @@ async function criarPagamentoSharpify({
     gatewayMethod: 'PIX'
   };
 
+  console.log(
+    'SHARPIFY PAYLOAD:',
+    JSON.stringify(payload)
+  );
+
   let response;
 
   try {
@@ -127,17 +141,21 @@ async function criarPagamentoSharpify({
 
       headers: {
         'Content-Type': 'application/json',
-        'x-sharpify-client-id': clientId,
-        'x-sharpify-client-secret': clientSecret
+
+        'x-sharpify-client-id':
+          clientId,
+
+        'x-sharpify-client-secret':
+          clientSecret
       },
 
       body: JSON.stringify(payload)
     });
   } catch (err) {
     const error = new Error(
-      `Não foi possível conectar à Sharpify: ${
+      `Falha de conexão com a Sharpify: ${
         err?.message ||
-        'erro de conexão'
+        'erro desconhecido'
       }`
     );
 
@@ -146,46 +164,50 @@ async function criarPagamentoSharpify({
     throw error;
   }
 
-  const raw = await response.text();
+  const rawText =
+    await response.text();
 
-  let result;
+  let data = {};
 
   try {
-    result = raw
-      ? JSON.parse(raw)
+    data = rawText
+      ? JSON.parse(rawText)
       : {};
   } catch {
-    result = {
-      raw
+    data = {
+      raw: rawText
     };
   }
 
   /*
-   * Se a Sharpify devolver erro,
-   * preservamos a resposta para diagnóstico.
+   * A Sharpify retornou erro.
    */
   if (!response.ok) {
-    const sharpifyMessage =
-      result?.message ||
-      result?.error ||
-      result?.detail ||
-      result?.raw ||
+    console.error(
+      'SHARPIFY HTTP ERROR:',
+      response.status
+    );
+
+    console.error(
+      'SHARPIFY RESPONSE:',
+      JSON.stringify(data)
+    );
+
+    const apiError =
+      data?.message ||
+      data?.error ||
+      data?.detail ||
+      data?.raw ||
       `HTTP ${response.status}`;
 
     const error = new Error(
-      `Sharpify HTTP ${response.status}: ${getMessage(
-        sharpifyMessage
+      `Sharpify HTTP ${response.status}: ${normalizeMessage(
+        apiError
       )}`
     );
 
-    error.status = response.status;
-
-    /*
-     * Informações seguras para diagnóstico.
-     * NÃO retornamos clientSecret.
-     */
-    error.sharpifyResponse = result;
-    error.sharpifyPayload = payload;
+    error.status =
+      response.status;
 
     throw error;
   }
@@ -195,70 +217,97 @@ async function criarPagamentoSharpify({
    *
    * { data: PaymentLinkProps }
    */
-  const paymentLink = result?.data;
+  const paymentLink =
+    data?.data;
 
   if (
     !paymentLink ||
     typeof paymentLink !== 'object'
   ) {
+    console.error(
+      'SHARPIFY RESPONSE SEM DATA:',
+      JSON.stringify(data)
+    );
+
     const error = new Error(
-      'A Sharpify respondeu sem o objeto data do pagamento.'
+      'A Sharpify respondeu sem os dados do pagamento.'
     );
 
     error.status = 502;
-    error.sharpifyResponse = result;
 
     throw error;
   }
 
   const payment =
-    paymentLink.payment || null;
+    paymentLink.payment ||
+    null;
 
   const gateway =
-    payment?.gateway || null;
+    payment?.gateway ||
+    null;
 
   const gatewayData =
-    gateway?.data || {};
-
-  const copyPaste =
-    text(gatewayData.code);
-
-  const qrCode =
-    text(gatewayData.qrCode);
-
-  const paymentLinkUrl =
-    text(gatewayData.paymentLink);
+    gateway?.data ||
+    {};
 
   /*
-   * Precisamos de pelo menos um
-   * dos dados necessários para pagar.
+   * Código PIX copia e cola.
+   */
+  const copyPaste =
+    clean(gatewayData.code);
+
+  /*
+   * QR Code retornado pela Sharpify.
+   */
+  const qrCode =
+    clean(gatewayData.qrCode);
+
+  /*
+   * Link externo de pagamento,
+   * caso exista.
+   */
+  const paymentLinkUrl =
+    clean(gatewayData.paymentLink);
+
+  /*
+   * A resposta precisa trazer pelo
+   * menos uma forma de pagamento.
    */
   if (
     !copyPaste &&
     !qrCode &&
     !paymentLinkUrl
   ) {
+    console.error(
+      'SHARPIFY SEM DADOS DE PAGAMENTO:',
+      JSON.stringify(data)
+    );
+
     const error = new Error(
-      'A Sharpify criou o pagamento, mas não retornou código PIX, QR Code ou link de pagamento.'
+      'A Sharpify criou o pagamento, mas não retornou código PIX, QR Code ou link.'
     );
 
     error.status = 502;
-    error.sharpifyResponse = result;
 
     throw error;
   }
 
-  const finalAmount = Number(
-    payment?.amount ??
-    paymentLink?.pricing?.total ??
-    amount
-  );
+  const finalAmount =
+    Number(
+      payment?.amount ??
+      paymentLink?.pricing?.total ??
+      amount
+    );
 
   return {
     provider: 'sharpify',
 
     transactionId:
       payment?.id ||
+      paymentLink?.id ||
+      null,
+
+    paymentLinkId:
       paymentLink?.id ||
       null,
 
@@ -270,18 +319,13 @@ async function criarPagamentoSharpify({
       paymentLink?.status ||
       'PENDING',
 
-    amount: Math.round(
-      finalAmount * 100
-    ),
+    amount:
+      Math.round(
+        finalAmount * 100
+      ),
 
     amountDisplay:
-      Number(finalAmount).toLocaleString(
-        'pt-BR',
-        {
-          style: 'currency',
-          currency: 'BRL'
-        }
-      ),
+      formatBRL(finalAmount),
 
     paymentData: {
       copyPaste:
@@ -310,6 +354,9 @@ export default async function handler(
   req,
   res
 ) {
+  /*
+   * Somente POST.
+   */
   if (req.method !== 'POST') {
     return res.status(405).json({
       success: false,
@@ -352,14 +399,14 @@ export default async function handler(
         : {};
 
     const productName =
-      text(body.product_name) ||
+      clean(body.product_name) ||
       `Recarga ${
-        text(metadata.operadora) ||
+        clean(metadata.operadora) ||
         'Celular'
       }`;
 
     const payment =
-      await criarPagamentoSharpify({
+      await createSharpifyPayment({
         amount,
         productName,
         metadata
@@ -374,30 +421,9 @@ export default async function handler(
   } catch (error) {
     console.error(
       'ERRO SHARPIFY:',
-      error?.message
+      error?.message ||
+      error
     );
-
-    /*
-     * Mostra no log da Vercel a resposta
-     * real da Sharpify, sem mostrar segredo.
-     */
-    if (error?.sharpifyResponse) {
-      console.error(
-        'RESPOSTA SHARPIFY:',
-        JSON.stringify(
-          error.sharpifyResponse
-        )
-      );
-    }
-
-    if (error?.sharpifyPayload) {
-      console.error(
-        'PAYLOAD ENVIADO:',
-        JSON.stringify(
-          error.sharpifyPayload
-        )
-      );
-    }
 
     const status =
       Number(error?.status) >= 400 &&
@@ -409,7 +435,7 @@ export default async function handler(
       success: false,
       gateway: 'sharpify',
       message:
-        getMessage(
+        normalizeMessage(
           error?.message ||
           error
         )
