@@ -1,9 +1,9 @@
 const SHARPIFY_DEFAULT_URL =
   'https://sharpify-pay.com/api/v1/gateway/payment/create-paymnet';
 
-function normalizeMessage(value) {
+function getMessage(value) {
   if (!value) {
-    return 'A Sharpify recusou a solicitação.';
+    return 'Erro desconhecido retornado pela Sharpify.';
   }
 
   if (typeof value === 'string') {
@@ -11,94 +11,104 @@ function normalizeMessage(value) {
   }
 
   if (value.message) {
-    return normalizeMessage(value.message);
+    return getMessage(value.message);
   }
 
   if (value.error) {
-    return normalizeMessage(value.error);
+    return getMessage(value.error);
   }
 
   if (value.detail) {
-    return normalizeMessage(value.detail);
+    return getMessage(value.detail);
   }
 
   try {
     return JSON.stringify(value);
   } catch {
-    return 'Erro retornado pela Sharpify.';
+    return 'Erro desconhecido retornado pela Sharpify.';
   }
 }
 
-function clean(value) {
+function digits(value) {
+  return String(value ?? '').replace(/\D/g, '');
+}
+
+function text(value) {
   return String(value ?? '').trim();
 }
 
-async function createSharpify({
+async function criarPagamentoSharpify({
   amount,
-  input,
+  productName,
   metadata
 }) {
-  const clientId =
-    process.env.SHARPIFY_CLIENT_ID;
+  const clientId = text(
+    process.env.SHARPIFY_CLIENT_ID
+  );
 
-  const clientSecret =
-    process.env.SHARPIFY_CLIENT_SECRET;
+  const clientSecret = text(
+    process.env.SHARPIFY_CLIENT_SECRET
+  );
 
   if (!clientId) {
     const error = new Error(
-      'SHARPIFY_CLIENT_ID não configurado na Vercel.'
+      'SHARPIFY_CLIENT_ID não está configurado na Vercel.'
     );
 
     error.status = 500;
-
     throw error;
   }
 
   if (!clientSecret) {
     const error = new Error(
-      'SHARPIFY_CLIENT_SECRET não configurado na Vercel.'
+      'SHARPIFY_CLIENT_SECRET não está configurado na Vercel.'
     );
 
     error.status = 500;
-
     throw error;
   }
 
-  const url =
-    process.env.SHARPIFY_API_URL ||
+  const apiUrl =
+    text(process.env.SHARPIFY_API_URL) ||
     SHARPIFY_DEFAULT_URL;
 
-  const telefone = clean(
+  const telefone = digits(
     metadata?.telefone
   );
 
-  const operadora = clean(
+  const operadora = text(
     metadata?.operadora
   );
 
+  /*
+   * A Sharpify exige:
+   *
+   * name
+   * amount
+   * gatewayMethod
+   *
+   * description é opcional.
+   */
+
   const name =
-    clean(input?.product_name) ||
+    text(productName) ||
     `Recarga ${operadora || 'Celular'}`;
 
   const description = [
     'Recarga de celular',
     operadora
       ? `Operadora: ${operadora}`
-      : '',
+      : null,
     telefone
       ? `Telefone: ${telefone}`
-      : ''
+      : null
   ]
     .filter(Boolean)
     .join(' - ');
 
   /*
-   * PAYLOAD EXATO DO ENDPOINT SHARPIFY
-   *
-   * name: obrigatório
-   * description: opcional
-   * amount: obrigatório
-   * gatewayMethod: obrigatório
+   * Payload exatamente conforme
+   * a documentação oficial da Sharpify.
    */
   const payload = {
     name,
@@ -112,27 +122,22 @@ async function createSharpify({
   let response;
 
   try {
-    response = await fetch(url, {
+    response = await fetch(apiUrl, {
       method: 'POST',
 
       headers: {
-        'Content-Type':
-          'application/json',
-
-        'x-sharpify-client-id':
-          clientId,
-
-        'x-sharpify-client-secret':
-          clientSecret
+        'Content-Type': 'application/json',
+        'x-sharpify-client-id': clientId,
+        'x-sharpify-client-secret': clientSecret
       },
 
       body: JSON.stringify(payload)
     });
   } catch (err) {
     const error = new Error(
-      `Falha de conexão com a Sharpify: ${
+      `Não foi possível conectar à Sharpify: ${
         err?.message ||
-        'erro desconhecido'
+        'erro de conexão'
       }`
     );
 
@@ -141,104 +146,92 @@ async function createSharpify({
     throw error;
   }
 
-  const rawText =
-    await response.text();
+  const raw = await response.text();
 
-  let data = {};
+  let result;
 
   try {
-    data = rawText
-      ? JSON.parse(rawText)
+    result = raw
+      ? JSON.parse(raw)
       : {};
   } catch {
-    data = {
-      raw: rawText
+    result = {
+      raw
     };
   }
 
   /*
-   * AQUI ESTÁ A PARTE IMPORTANTE:
-   * não esconderemos a resposta da Sharpify.
+   * Se a Sharpify devolver erro,
+   * preservamos a resposta para diagnóstico.
    */
   if (!response.ok) {
-    const apiError =
-      data?.message ||
-      data?.error ||
-      data?.detail ||
-      data?.raw ||
+    const sharpifyMessage =
+      result?.message ||
+      result?.error ||
+      result?.detail ||
+      result?.raw ||
       `HTTP ${response.status}`;
 
-    const message =
-      normalizeMessage(apiError);
-
     const error = new Error(
-      `Sharpify HTTP ${response.status}: ${message}`
+      `Sharpify HTTP ${response.status}: ${getMessage(
+        sharpifyMessage
+      )}`
     );
 
-    error.status =
-      response.status;
+    error.status = response.status;
+
+    /*
+     * Informações seguras para diagnóstico.
+     * NÃO retornamos clientSecret.
+     */
+    error.sharpifyResponse = result;
+    error.sharpifyPayload = payload;
 
     throw error;
   }
 
   /*
-   * Documentação Sharpify:
+   * A documentação informa:
    *
-   * {
-   *   data: PaymentLinkProps
-   * }
+   * { data: PaymentLinkProps }
    */
-  const paymentLink =
-    data?.data;
+  const paymentLink = result?.data;
 
   if (
     !paymentLink ||
     typeof paymentLink !== 'object'
   ) {
     const error = new Error(
-      'A Sharpify respondeu sem data do pagamento.'
+      'A Sharpify respondeu sem o objeto data do pagamento.'
     );
 
     error.status = 502;
+    error.sharpifyResponse = result;
 
     throw error;
   }
 
   const payment =
-    paymentLink.payment ||
-    null;
+    paymentLink.payment || null;
 
   const gateway =
-    payment?.gateway ||
-    null;
+    payment?.gateway || null;
 
   const gatewayData =
-    gateway?.data ||
-    {};
+    gateway?.data || {};
 
-  /*
-   * Segundo a documentação:
-   *
-   * payment.gateway.data.code
-   * payment.gateway.data.qrCode
-   * payment.gateway.data.paymentLink
-   */
   const copyPaste =
-    gatewayData.code ||
-    '';
+    text(gatewayData.code);
 
   const qrCode =
-    gatewayData.qrCode ||
-    '';
+    text(gatewayData.qrCode);
 
   const paymentLinkUrl =
-    gatewayData.paymentLink ||
-    '';
+    text(gatewayData.paymentLink);
 
   /*
-   * Se a Sharpify criou o link,
-   * mas não retornou nenhum dado de PIX,
-   * devolvemos erro claro.
+   * Precisamos de pelo menos um
+   * dos dados necessários para pagar.
    */
   if (
     !copyPaste &&
@@ -246,55 +239,43 @@ async function createSharpify({
     !paymentLinkUrl
   ) {
     const error = new Error(
-      'A Sharpify criou o pagamento, mas não retornou código Pix, QR Code ou link.'
+      'A Sharpify criou o pagamento, mas não retornou código PIX, QR Code ou link de pagamento.'
     );
 
     error.status = 502;
+    error.sharpifyResponse = result;
 
     throw error;
   }
 
-  const finalAmount =
-    Number(
-      payment?.amount ??
-      paymentLink?.pricing?.total ??
-      amount
-    );
+  const finalAmount = Number(
+    payment?.amount ??
+    paymentLink?.pricing?.total ??
+    amount
+  );
 
   return {
     provider: 'sharpify',
-
-    paymentData: {
-      copyPaste,
-
-      qrCodeBase64:
-        typeof qrCode === 'string' &&
-        qrCode.startsWith('data:image/')
-          ? qrCode
-          : null,
-
-      qrCode,
-
-      paymentLink:
-        paymentLinkUrl || null
-    },
 
     transactionId:
       payment?.id ||
       paymentLink?.id ||
       null,
 
+    shortReference:
+      paymentLink?.shortReference ||
+      null,
+
     status:
       paymentLink?.status ||
       'PENDING',
 
-    amount:
-      Math.round(
-        finalAmount * 100
-      ),
+    amount: Math.round(
+      finalAmount * 100
+    ),
 
     amountDisplay:
-      Number(amount).toLocaleString(
+      Number(finalAmount).toLocaleString(
         'pt-BR',
         {
           style: 'currency',
@@ -302,12 +283,26 @@ async function createSharpify({
         }
       ),
 
-    invoiceUrl:
-      paymentLinkUrl || null,
+    paymentData: {
+      copyPaste:
+        copyPaste || null,
 
-    shortReference:
-      paymentLink?.shortReference ||
-      null
+      qrCode:
+        qrCode || null,
+
+      qrCodeBase64:
+        qrCode.startsWith(
+          'data:image/'
+        )
+          ? qrCode
+          : null,
+
+      paymentLink:
+        paymentLinkUrl || null
+    },
+
+    invoiceUrl:
+      paymentLinkUrl || null
   };
 }
 
@@ -318,21 +313,25 @@ export default async function handler(
   if (req.method !== 'POST') {
     return res.status(405).json({
       success: false,
+      gateway: 'sharpify',
       message:
         'Método não permitido.'
     });
   }
 
   try {
-    const input =
+    const body =
       req.body &&
       typeof req.body === 'object'
         ? req.body
         : {};
 
     const amount =
-      Number(input.amount);
+      Number(body.amount);
 
+    /*
+     * Validação do valor.
+     */
     if (
       !Number.isFinite(amount) ||
       amount < 0.01 ||
@@ -340,35 +339,65 @@ export default async function handler(
     ) {
       return res.status(400).json({
         success: false,
+        gateway: 'sharpify',
         message:
-          'amount deve ser um número entre 0,01 e 1.000.'
+          'O valor da recarga deve estar entre R$ 0,01 e R$ 1.000,00.'
       });
     }
 
     const metadata =
-      input.metadata &&
-      typeof input.metadata === 'object'
-        ? input.metadata
+      body.metadata &&
+      typeof body.metadata === 'object'
+        ? body.metadata
         : {};
 
-    const data =
-      await createSharpify({
+    const productName =
+      text(body.product_name) ||
+      `Recarga ${
+        text(metadata.operadora) ||
+        'Celular'
+      }`;
+
+    const payment =
+      await criarPagamentoSharpify({
         amount,
-        input,
+        productName,
         metadata
       });
 
     return res.status(200).json({
       success: true,
-      data
+      gateway: 'sharpify',
+      data: payment
     });
 
   } catch (error) {
-    const message =
-      normalizeMessage(
-        error?.message ||
-        error
+    console.error(
+      'ERRO SHARPIFY:',
+      error?.message
+    );
+
+    /*
+     * Mostra no log da Vercel a resposta
+     * real da Sharpify, sem mostrar segredo.
+     */
+    if (error?.sharpifyResponse) {
+      console.error(
+        'RESPOSTA SHARPIFY:',
+        JSON.stringify(
+          error.sharpifyResponse
+        )
       );
+    }
+
+    if (error?.sharpifyPayload) {
+      console.error(
+        'PAYLOAD ENVIADO:',
+        JSON.stringify(
+          error.sharpifyPayload
+        )
+      );
+    }
 
     const status =
       Number(error?.status) >= 400 &&
@@ -379,7 +408,11 @@ export default async function handler(
     return res.status(status).json({
       success: false,
       gateway: 'sharpify',
-      message
+      message:
+        getMessage(
+          error?.message ||
+          error
+        )
     });
   }
 }
