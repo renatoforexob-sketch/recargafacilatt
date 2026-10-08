@@ -18,7 +18,7 @@ function formatBRL(value) {
 
 function normalizeMessage(value) {
   if (!value) {
-    return 'A Sharpify recusou a solicitação.';
+    return 'Erro desconhecido retornado pela Sharpify.';
   }
 
   if (typeof value === 'string') {
@@ -44,18 +44,51 @@ function normalizeMessage(value) {
   }
 }
 
+function getWebhookUrl(req) {
+  /*
+   * Permite configurar manualmente na Vercel.
+   *
+   * Exemplo:
+   * SHARPIFY_WEBHOOK_URL=https://seusite.com/api/sharpify-webhook
+   */
+
+  const configured =
+    clean(process.env.SHARPIFY_WEBHOOK_URL);
+
+  if (configured) {
+    return configured;
+  }
+
+  /*
+   * Quando a variável não estiver configurada,
+   * tenta montar automaticamente usando
+   * Vercel.
+   */
+  const host =
+    clean(req?.headers?.['x-forwarded-host']) ||
+    clean(req?.headers?.host);
+
+  if (!host) {
+    return null;
+  }
+
+  const protocol =
+    clean(req?.headers?.['x-forwarded-proto']) ||
+    'https';
+
+  return `${protocol}://${host}/api/sharpify-webhook`;
+}
+
 async function createSharpifyPayment({
   amount,
-  productName,
-  metadata
+  metadata,
+  req
 }) {
-  const clientId = clean(
-    process.env.SHARPIFY_CLIENT_ID
-  );
+  const clientId =
+    clean(process.env.SHARPIFY_CLIENT_ID);
 
-  const clientSecret = clean(
-    process.env.SHARPIFY_CLIENT_SECRET
-  );
+  const clientSecret =
+    clean(process.env.SHARPIFY_CLIENT_SECRET);
 
   if (!clientId) {
     const error = new Error(
@@ -79,16 +112,14 @@ async function createSharpifyPayment({
     clean(process.env.SHARPIFY_API_URL) ||
     SHARPIFY_DEFAULT_URL;
 
-  const telefone = onlyDigits(
-    metadata?.telefone
-  );
+  const telefone =
+    onlyDigits(metadata?.telefone);
 
-  const operadora = clean(
-    metadata?.operadora
-  );
+  const operadora =
+    clean(metadata?.operadora);
 
   /*
-   * Nome interno do pagamento.
+   * Nome da venda na Sharpify.
    *
    * Exemplo:
    * Recarga Fácil - Recarga TIM
@@ -99,25 +130,31 @@ async function createSharpifyPayment({
     }`;
 
   /*
-   * Mantemos na descrição os dados
-   * importantes da compra.
+   * Informações adicionais da compra.
    */
   const description = [
-    `Produto: ${name}`,
-    operadora
-      ? `Operadora: ${operadora}`
-      : null,
+    `Operadora: ${
+      operadora || 'Não informada'
+    }`,
+
     telefone
       ? `Telefone: ${telefone}`
       : null,
+
     `Valor: ${formatBRL(amount)}`
   ]
     .filter(Boolean)
     .join(' | ');
 
   /*
-   * Payload exatamente conforme
-   * a documentação do Gateway Sharpify.
+   * Webhook da própria aplicação.
+   */
+  const webhookURL =
+    getWebhookUrl(req);
+
+  /*
+   * Payload conforme a documentação
+   * do Gateway Sharpify.
    */
   const payload = {
     name,
@@ -128,8 +165,18 @@ async function createSharpifyPayment({
     gatewayMethod: 'PIX'
   };
 
+  /*
+   * Só adiciona webhook quando conseguimos
+   * determinar uma URL válida.
+   */
+  if (webhookURL) {
+    payload.webhook = {
+      callbackURL: webhookURL
+    };
+  }
+
   console.log(
-    'SHARPIFY PAYLOAD:',
+    'SHARPIFY PAYMENT PAYLOAD:',
     JSON.stringify(payload)
   );
 
@@ -151,17 +198,18 @@ async function createSharpifyPayment({
 
       body: JSON.stringify(payload)
     });
-  } catch (err) {
-    const error = new Error(
-      `Falha de conexão com a Sharpify: ${
-        err?.message ||
-        'erro desconhecido'
-      }`
-    );
+  } catch (error) {
+    const connectionError =
+      new Error(
+        `Falha de conexão com a Sharpify: ${
+          error?.message ||
+          'erro desconhecido'
+        }`
+      );
 
-    error.status = 502;
+    connectionError.status = 502;
 
-    throw error;
+    throw connectionError;
   }
 
   const rawText =
@@ -180,11 +228,11 @@ async function createSharpifyPayment({
   }
 
   /*
-   * A Sharpify retornou erro.
+   * Erro HTTP da Sharpify.
    */
   if (!response.ok) {
     console.error(
-      'SHARPIFY HTTP ERROR:',
+      'SHARPIFY HTTP:',
       response.status
     );
 
@@ -200,11 +248,12 @@ async function createSharpifyPayment({
       data?.raw ||
       `HTTP ${response.status}`;
 
-    const error = new Error(
-      `Sharpify HTTP ${response.status}: ${normalizeMessage(
-        apiError
-      )}`
-    );
+    const error =
+      new Error(
+        `Sharpify HTTP ${response.status}: ${normalizeMessage(
+          apiError
+        )}`
+      );
 
     error.status =
       response.status;
@@ -225,13 +274,14 @@ async function createSharpifyPayment({
     typeof paymentLink !== 'object'
   ) {
     console.error(
-      'SHARPIFY RESPONSE SEM DATA:',
+      'SHARPIFY RESPONSE:',
       JSON.stringify(data)
     );
 
-    const error = new Error(
-      'A Sharpify respondeu sem os dados do pagamento.'
-    );
+    const error =
+      new Error(
+        'A Sharpify respondeu sem os dados do pagamento.'
+      );
 
     error.status = 502;
 
@@ -251,27 +301,26 @@ async function createSharpifyPayment({
     {};
 
   /*
-   * Código PIX copia e cola.
+   * PIX copia e cola.
    */
   const copyPaste =
     clean(gatewayData.code);
 
   /*
-   * QR Code retornado pela Sharpify.
+   * QR Code.
    */
   const qrCode =
     clean(gatewayData.qrCode);
 
   /*
-   * Link externo de pagamento,
-   * caso exista.
+   * Link externo.
    */
   const paymentLinkUrl =
     clean(gatewayData.paymentLink);
 
   /*
-   * A resposta precisa trazer pelo
-   * menos uma forma de pagamento.
+   * O pagamento precisa retornar
+   * alguma forma de pagamento.
    */
   if (
     !copyPaste &&
@@ -283,9 +332,10 @@ async function createSharpifyPayment({
       JSON.stringify(data)
     );
 
-    const error = new Error(
-      'A Sharpify criou o pagamento, mas não retornou código PIX, QR Code ou link.'
-    );
+    const error =
+      new Error(
+        'A Sharpify criou o pagamento, mas não retornou código PIX, QR Code ou link.'
+      );
 
     error.status = 502;
 
@@ -302,12 +352,12 @@ async function createSharpifyPayment({
   return {
     provider: 'sharpify',
 
-    transactionId:
-      payment?.id ||
+    paymentLinkId:
       paymentLink?.id ||
       null,
 
-    paymentLinkId:
+    transactionId:
+      payment?.id ||
       paymentLink?.id ||
       null,
 
@@ -354,9 +404,6 @@ export default async function handler(
   req,
   res
 ) {
-  /*
-   * Somente POST.
-   */
   if (req.method !== 'POST') {
     return res.status(405).json({
       success: false,
@@ -398,18 +445,11 @@ export default async function handler(
         ? body.metadata
         : {};
 
-    const productName =
-      clean(body.product_name) ||
-      `Recarga ${
-        clean(metadata.operadora) ||
-        'Celular'
-      }`;
-
     const payment =
       await createSharpifyPayment({
         amount,
-        productName,
-        metadata
+        metadata,
+        req
       });
 
     return res.status(200).json({
