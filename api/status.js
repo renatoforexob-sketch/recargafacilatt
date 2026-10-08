@@ -1,15 +1,14 @@
-```javascript
+
 const SHARPIFY_STATUS_URL =
   'https://sharpify-pay.com/api/v1/gateway/payment/get-payment';
 
-function clean(value) {
-  return String(value ?? '').trim();
-}
+const clean = value => String(value ?? '').trim();
 
 export default async function handler(req, res) {
   if (req.method !== 'GET') {
     return res.status(405).json({
       success: false,
+      gateway: 'sharpify',
       message: 'Método não permitido.'
     });
   }
@@ -21,13 +20,10 @@ export default async function handler(req, res) {
     return res.status(500).json({
       success: false,
       gateway: 'sharpify',
-      message:
-        'Configure SHARPIFY_CLIENT_ID e SHARPIFY_CLIENT_SECRET nas variáveis de ambiente da Vercel.'
+      message: 'Credenciais Sharpify não configuradas na Vercel.'
     });
   }
 
-  // Aceita o identificador do link de pagamento retornado
-  // pela criação do pagamento na Sharpify.
   const paymentLinkId = clean(req.query?.paymentLinkId);
 
   if (!paymentLinkId) {
@@ -52,7 +48,6 @@ export default async function handler(req, res) {
     });
 
     const responseText = await response.text();
-
     let data;
 
     try {
@@ -64,10 +59,10 @@ export default async function handler(req, res) {
     }
 
     return res.status(response.status).json(data);
-  } catch (error) {
+  } catch (err) {
     console.error(
-      'Erro ao consultar pagamento Sharpify:',
-      error?.message || 'Erro desconhecido'
+      'Erro ao consultar status Sharpify:',
+      err?.message || err
     );
 
     return res.status(502).json({
@@ -77,4 +72,3 @@ export default async function handler(req, res) {
     });
   }
 }
-```
