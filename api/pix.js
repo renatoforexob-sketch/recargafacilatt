@@ -44,14 +44,17 @@ function normalizeMessage(value) {
   }
 }
 
+/*
+|--------------------------------------------------------------------------
+| WEBHOOK URL
+|--------------------------------------------------------------------------
+*/
+
 function getWebhookUrl(req) {
   /*
-   * Permite configurar manualmente na Vercel.
-   *
-   * Exemplo:
-   * SHARPIFY_WEBHOOK_URL=https://seusite.com/api/sharpify-webhook
+   * Se você colocar SHARPIFY_WEBHOOK_URL na Vercel,
+   * ela terá prioridade.
    */
-
   const configured =
     clean(process.env.SHARPIFY_WEBHOOK_URL);
 
@@ -60,24 +63,35 @@ function getWebhookUrl(req) {
   }
 
   /*
-   * Quando a variável não estiver configurada,
-   * tenta montar automaticamente usando
-   * Vercel.
+   * Caso não exista variável,
+   * tenta montar automaticamente.
    */
   const host =
-    clean(req?.headers?.['x-forwarded-host']) ||
-    clean(req?.headers?.host);
+    clean(
+      req?.headers?.['x-forwarded-host']
+    ) ||
+    clean(
+      req?.headers?.host
+    );
 
   if (!host) {
     return null;
   }
 
   const protocol =
-    clean(req?.headers?.['x-forwarded-proto']) ||
+    clean(
+      req?.headers?.['x-forwarded-proto']
+    ) ||
     'https';
 
-  return `${protocol}://${host}/api/sharpify-webhook`;
+  return `${protocol}://${host}/api/pix`;
 }
+
+/*
+|--------------------------------------------------------------------------
+| CRIAR PAGAMENTO SHARPIFY
+|--------------------------------------------------------------------------
+*/
 
 async function createSharpifyPayment({
   amount,
@@ -85,10 +99,14 @@ async function createSharpifyPayment({
   req
 }) {
   const clientId =
-    clean(process.env.SHARPIFY_CLIENT_ID);
+    clean(
+      process.env.SHARPIFY_CLIENT_ID
+    );
 
   const clientSecret =
-    clean(process.env.SHARPIFY_CLIENT_SECRET);
+    clean(
+      process.env.SHARPIFY_CLIENT_SECRET
+    );
 
   if (!clientId) {
     const error = new Error(
@@ -96,6 +114,7 @@ async function createSharpifyPayment({
     );
 
     error.status = 500;
+
     throw error;
   }
 
@@ -105,21 +124,28 @@ async function createSharpifyPayment({
     );
 
     error.status = 500;
+
     throw error;
   }
 
   const apiUrl =
-    clean(process.env.SHARPIFY_API_URL) ||
+    clean(
+      process.env.SHARPIFY_API_URL
+    ) ||
     SHARPIFY_DEFAULT_URL;
 
   const telefone =
-    onlyDigits(metadata?.telefone);
+    onlyDigits(
+      metadata?.telefone
+    );
 
   const operadora =
-    clean(metadata?.operadora);
+    clean(
+      metadata?.operadora
+    );
 
   /*
-   * Nome da venda na Sharpify.
+   * Nome da venda dentro da Sharpify.
    *
    * Exemplo:
    * Recarga Fácil - Recarga TIM
@@ -130,7 +156,7 @@ async function createSharpifyPayment({
     }`;
 
   /*
-   * Informações adicionais da compra.
+   * Informações da compra.
    */
   const description = [
     `Operadora: ${
@@ -147,14 +173,13 @@ async function createSharpifyPayment({
     .join(' | ');
 
   /*
-   * Webhook da própria aplicação.
+   * URL que receberá os eventos da Sharpify.
    */
   const webhookURL =
     getWebhookUrl(req);
 
   /*
-   * Payload conforme a documentação
-   * do Gateway Sharpify.
+   * Payload oficial do Gateway Sharpify.
    */
   const payload = {
     name,
@@ -166,8 +191,7 @@ async function createSharpifyPayment({
   };
 
   /*
-   * Só adiciona webhook quando conseguimos
-   * determinar uma URL válida.
+   * Adiciona webhook ao pagamento.
    */
   if (webhookURL) {
     payload.webhook = {
@@ -183,21 +207,26 @@ async function createSharpifyPayment({
   let response;
 
   try {
-    response = await fetch(apiUrl, {
-      method: 'POST',
+    response = await fetch(
+      apiUrl,
+      {
+        method: 'POST',
 
-      headers: {
-        'Content-Type': 'application/json',
+        headers: {
+          'Content-Type':
+            'application/json',
 
-        'x-sharpify-client-id':
-          clientId,
+          'x-sharpify-client-id':
+            clientId,
 
-        'x-sharpify-client-secret':
-          clientSecret
-      },
+          'x-sharpify-client-secret':
+            clientSecret
+        },
 
-      body: JSON.stringify(payload)
-    });
+        body:
+          JSON.stringify(payload)
+      }
+    );
   } catch (error) {
     const connectionError =
       new Error(
@@ -228,7 +257,7 @@ async function createSharpifyPayment({
   }
 
   /*
-   * Erro HTTP da Sharpify.
+   * Erro retornado pela Sharpify.
    */
   if (!response.ok) {
     console.error(
@@ -262,9 +291,11 @@ async function createSharpifyPayment({
   }
 
   /*
-   * A documentação informa:
+   * Resposta esperada:
    *
-   * { data: PaymentLinkProps }
+   * {
+   *   data: PaymentLinkProps
+   * }
    */
   const paymentLink =
     data?.data;
@@ -304,22 +335,28 @@ async function createSharpifyPayment({
    * PIX copia e cola.
    */
   const copyPaste =
-    clean(gatewayData.code);
+    clean(
+      gatewayData.code
+    );
 
   /*
    * QR Code.
    */
   const qrCode =
-    clean(gatewayData.qrCode);
+    clean(
+      gatewayData.qrCode
+    );
 
   /*
    * Link externo.
    */
   const paymentLinkUrl =
-    clean(gatewayData.paymentLink);
+    clean(
+      gatewayData.paymentLink
+    );
 
   /*
-   * O pagamento precisa retornar
+   * Verifica se a Sharpify retornou
    * alguma forma de pagamento.
    */
   if (
@@ -400,10 +437,215 @@ async function createSharpifyPayment({
   };
 }
 
+/*
+|--------------------------------------------------------------------------
+| RECEBER WEBHOOK SHARPIFY
+|--------------------------------------------------------------------------
+*/
+
+async function handleSharpifyWebhook(
+  req,
+  res
+) {
+  const body =
+    req.body &&
+    typeof req.body === 'object'
+      ? req.body
+      : null;
+
+  if (!body) {
+    return res.status(400).json({
+      success: false,
+      message:
+        'Webhook inválido.'
+    });
+  }
+
+  const event =
+    body.event || {};
+
+  const eventName =
+    clean(event.name);
+
+  const webhookId =
+    clean(event.webhookId);
+
+  const eventId =
+    clean(event.id);
+
+  const context =
+    clean(event.context);
+
+  const contextId =
+    clean(event.contextId);
+
+  const occurredAt =
+    clean(event.occurredAt);
+
+  const paymentLink =
+    body?.data?.paymentLink ||
+    {};
+
+  /*
+   * Log do webhook.
+   *
+   * Não registramos credenciais.
+   */
+  console.log(
+    'SHARPIFY WEBHOOK:',
+    JSON.stringify({
+      schemaVersion:
+        body.schemaVersion ||
+        null,
+
+      eventId:
+        eventId ||
+        null,
+
+      webhookId:
+        webhookId ||
+        null,
+
+      eventName:
+        eventName ||
+        null,
+
+      context:
+        context ||
+        null,
+
+      contextId:
+        contextId ||
+        null,
+
+      occurredAt:
+        occurredAt ||
+        null,
+
+      paymentLinkId:
+        paymentLink.id ||
+        null,
+
+      shortReference:
+        paymentLink.shortReference ||
+        null,
+
+      status:
+        paymentLink.status ||
+        null,
+
+      paymentId:
+        paymentLink?.payment?.id ||
+        null,
+
+      amount:
+        paymentLink?.payment?.amount ??
+        paymentLink?.pricing?.total ??
+        null,
+
+      name:
+        paymentLink.name ||
+        null
+    })
+  );
+
+  /*
+   * PAGAMENTO APROVADO
+   */
+  if (
+    eventName ===
+    'PAYMENT_LINK_APPROVED'
+  ) {
+    console.log(
+      'SHARPIFY: PAGAMENTO APROVADO',
+      JSON.stringify({
+        webhookId,
+        paymentLinkId:
+          paymentLink.id ||
+          contextId ||
+          null,
+
+        paymentId:
+          paymentLink?.payment?.id ||
+          null,
+
+        amount:
+          paymentLink?.payment?.amount ??
+          paymentLink?.pricing?.total ??
+          null
+      })
+    );
+
+    /*
+     * Aqui é o ponto onde o sistema
+     * considera o pagamento aprovado.
+     *
+     * Futuramente pode executar:
+     *
+     * - registrar venda;
+     * - liberar recarga;
+     * - atualizar painel;
+     * - registrar conversão.
+     */
+  }
+
+  /*
+   * PAGAMENTO CANCELADO
+   */
+  if (
+    eventName ===
+    'PAYMENT_LINK_CANCELLED'
+  ) {
+    console.log(
+      'SHARPIFY: PAGAMENTO CANCELADO',
+      JSON.stringify({
+        webhookId,
+        paymentLinkId:
+          paymentLink.id ||
+          contextId ||
+          null
+      })
+    );
+  }
+
+  /*
+   * A Sharpify espera resposta 2xx.
+   */
+  return res.status(200).json({
+    success: true,
+    received: true,
+    webhookId:
+      webhookId ||
+      null,
+    event:
+      eventName ||
+      null
+  });
+}
+
+/*
+|--------------------------------------------------------------------------
+| HANDLER PRINCIPAL
+|--------------------------------------------------------------------------
+*/
+
 export default async function handler(
   req,
   res
 ) {
+  /*
+   * O mesmo endpoint:
+   *
+   * POST /api/pix
+   *
+   * também recebe:
+   *
+   * POST /api/pix
+   * com webhook da Sharpify.
+   *
+   * Identificamos pelo formato da requisição.
+   */
+
   if (req.method !== 'POST') {
     return res.status(405).json({
       success: false,
@@ -413,6 +655,47 @@ export default async function handler(
     });
   }
 
+  /*
+   * Se vier no formato de webhook,
+   * processa o webhook.
+   *
+   * A Sharpify envia "event".
+   */
+  if (
+    req.body &&
+    typeof req.body === 'object' &&
+    req.body.event &&
+    (
+      req.body.event.name ===
+        'PAYMENT_LINK_APPROVED' ||
+      req.body.event.name ===
+        'PAYMENT_LINK_CANCELLED'
+    )
+  ) {
+    try {
+      return await handleSharpifyWebhook(
+        req,
+        res
+      );
+    } catch (error) {
+      console.error(
+        'ERRO WEBHOOK SHARPIFY:',
+        error?.message ||
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message:
+          'Erro ao processar webhook.'
+      });
+    }
+  }
+
+  /*
+   * Caso contrário, é uma criação
+   * normal de pagamento.
+   */
   try {
     const body =
       req.body &&
